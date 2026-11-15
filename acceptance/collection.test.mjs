@@ -1,60 +1,52 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { senmlFixture } from '../src/senml-source.mjs';
+import { votableFixture } from '../src/votable-source.mjs';
 import * as intake from '../src/intake.mjs';
 import { Inbox } from '../src/store.mjs';
 
-async function run(scenario, representation, check) {
+async function run(scenario, check) {
   assert.equal(typeof intake.collect, 'function', 'collection entry is not available yet');
-  const source = await senmlFixture(scenario, representation);
+  const source = await votableFixture(scenario);
   const store = new Inbox();
   try { await check(await intake.collect(source, store), source, store); }
   finally { store.close(); await source.close(); }
 }
 
-for (const representation of ['json', 'cbor']) {
-  test(`按包恢复基准、类型和相对时间：${representation}`, async () => {
-    await run('normal', representation, async (result, source, store) => {
-      assert.equal(result.records.length, 6);
-      const temperature = result.records.find(record => record.name === 'urn:station:A:temperature');
-      assert.equal(temperature.valueType, 'number');
-      assert.equal(temperature.value, 11.5);
-      assert.equal(temperature.unit, 'Cel');
-      assert.deepEqual(temperature.time, { kind: 'absolute', seconds: 1699999998 });
-      const alarm = result.records.find(record => record.name === 'urn:station:A:alarm');
-      assert.equal(alarm.valueType, 'boolean');
-      assert.equal(alarm.value, true);
-      assert.equal(alarm.unit, '/');
-      const voltage = result.records.find(record => record.name === 'urn:station:B:voltage');
-      assert.equal(voltage.value, 3);
-      const relative = result.records.find(record => record.name === 'urn:station:C:temperature');
-      assert.equal(relative.value, 8);
-      assert.deepEqual(relative.time, { kind: 'relative', seconds: -5 });
-      const bytes = result.records.find(record => record.name === 'urn:station:C:payload');
-      assert.equal(bytes.valueType, 'bytes');
-      assert.deepEqual(bytes.value, [0, 255, 17]);
-      assert.ok(result.records.every(record => record.evidence && Number.isInteger(record.recordIndex) && record.packId));
-      assert.deepEqual(new Set(source.requests), new Set(['/pack/one', '/pack/two']));
-      assert.equal(store.evidence().length, 2);
+test('BINARY2空值、空数组及64位身份保持区别，表和字段作用域不串用', async () => {
+  await run('normal', async (result, source, store) => {
+    const primary = result.tables.find(table => table.tableId === 'primary');
+    const matches = result.tables.find(table => table.tableId === 'matches');
+    assert.equal(primary.rows.length, 3);
+    assert.equal(primary.rows[0].cells['target-id'].value, '9007199254740993');
+    assert.equal(primary.rows[0].cells.samples.isNull, true);
+    assert.deepEqual(primary.rows[1].cells.samples.value, []);
+    assert.equal(primary.rows[1].cells.samples.isNull, false);
+    assert.deepEqual(primary.rows[2].cells.samples.value, [0, -2]);
+    assert.equal(matches.rows[0].cells.separation.value, 0);
+    assert.equal(primary.context.release, '2026A');
+    assert.equal(matches.context.release, '2026B');
+    assert.deepEqual(primary.groups[0].fieldRefs, ['samples']);
+    assert.ok(primary.rows.every(row => row.evidence && row.cells.samples.byteRange.length === 2));
+    assert.equal(store.evidence().length, 1);
+    assert.deepEqual(source.requests, ['/catalogue']);
+  });
+});
+
+for (const scenario of ['truncated', 'bad-count', 'missing-reference']) {
+  test(`隔离无法解释的表而保留独立表：${scenario}`, async () => {
+    await run(scenario, async result => {
+      assert.equal(result.tables.some(table => table.tableId === 'primary'), false);
+      assert.equal(result.tables.find(table => table.tableId === 'matches').rows.length, 1);
+      assert.ok(result.pending.some(item => item.tableId === 'primary' && item.reason));
     });
   });
 }
 
-for (const scenario of ['required-extension', 'conflicting-values', 'unsupported-version', 'truncated']) {
-  test(`问题包不污染另一包且保留不完整边界：${scenario}`, async () => {
-    await run(scenario, 'cbor', async (result, source, store) => {
-      assert.equal(result.records.some(record => record.packId === 'one'), false);
-      assert.equal(result.records.filter(record => record.packId === 'two').length, 3);
-      assert.ok(result.pending.some(item => item.packId === 'one' && item.reason));
-      assert.equal(store.evidence().length, 2);
-      assert.equal(source.requests.length, 2);
-    });
-  });
-}
-
-test('未知可选字段不吞掉合法读数', async () => {
-  await run('unknown-optional', 'json', async result => {
-    assert.equal(result.records.length, 6);
-    assert.equal(result.pending.length, 0);
+test('TABLEDATA按同一字段描述解释长整数，不以显示名称作键', async () => {
+  await run('tabledata', async result => {
+    const primary = result.tables.find(table => table.tableId === 'primary');
+    assert.equal(primary.rows[0].cells['target-id'].value, '9007199254740993');
+    assert.deepEqual(primary.rows[2].cells.samples.value, [0, -2]);
+    assert.equal(primary.fields.filter(field => field.name === 'value').length, 2);
   });
 });

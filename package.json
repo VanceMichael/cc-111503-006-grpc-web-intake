@@ -11,5 +11,7 @@
     "demo": "node src/demo.mjs",
     "acceptance": "node --test acceptance/*.test.mjs"
   },
-  "dependencies": {}
+  "dependencies": {
+    "saxes": "6.0.0"
+  }
 }
