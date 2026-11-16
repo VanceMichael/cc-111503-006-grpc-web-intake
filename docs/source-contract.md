@@ -18,6 +18,32 @@ src/votable-source.mjs的votableFixture以loopback HTTP提供交接原件。sour
 
 新增collect(source,store)，调用方创建和关闭来源及Inbox。返回tables和pending；有效表含tableId、resourcePath、fields、groups、context、rows。groups元素至少含fieldRefs。每行含rowIndex、evidence、cells，cells按字段ID区分；单元格含value、isNull、fieldId及原表示证据。BINARY2的byteRange是解码后STREAM内的[start,end)真实字节区间，另保留包含它的XML STREAM定位；TABLEDATA保留TR/TD定位及原文本。未知或不完整表只进pending，含tableId、reason及能确认的边界；其他独立TABLE可以交付。原XML由Inbox保存一次，不能仅保存解码后的重建对象。
 
+## 采集结果（collect）
+
+`collect` 从同一 URL 读取一次原件并存入 Inbox（kind `votable`），再用这些字节解释表；不重复请求，也不把解码结果当作原件留存。`mode` 为 `votable-collection`，`version` 为原件 `VOTABLE` 根上声明的版本。HTTP 非 2xx 时报错且不写入证据；原件不是合法 UTF-8 时留存原件并整体进 `pending`。
+
+逐表交付与逐表隔离：
+
+- 每张 TABLE 独立解释。表结构、字段声明、FIELDref 或行数据任一不成立时，该表进入 `pending`，含 `tableId`、`resourcePath`、`reason`、`boundary`；同文档其他 TABLE 照常交付。
+- XML 整体不良构（或 DTD/外部实体声明）时不交付任何表，所有已发现表及文档本身进入 `pending`；同一资源路径下重复的 TABLE ID 不合并，全部进 `pending`。
+- 不支持的编码（外部 href、旧 BINARY、FITS、非 base64 STREAM）进 `pending`，不发起外链请求。
+
+字段身份与上下文：
+
+- `fields[]` 含 `fieldId`、`declaredId`、`name`、`datatype`、`arraysize`、`unit`、`ucd`、`utype`、`source`（原 XML 行列与字节偏移）、`referencedBy`。`unit`/`ucd`/`utype` 只是随字段保留的声明语义，不据此做天体计算。
+- FIELD 无 ID 时 `fieldId` 取 `FIELD@<字节偏移>`，同一原件内可追溯；显示名从不作键。
+- `groups[].fieldRefs` 是本表内的字段键。ref 先按 ID、再按本表声明 ID 解析；跨表同名不命中，解析不到即整表进 `pending`。
+- `context` 是按 RESOURCE 嵌套累积的 PARAM 名值；子资源覆盖父值，兄弟资源互不继承。`contextEvidence[]` 给出每个值的 PARAM 来源与 `resourcePath`。TABLE 内直接声明的 PARAM 单列于 `params[]`。
+- `resourcePath` 用 `RESOURCE:<ID>`，无 ID 时为 `RESOURCE[<序号>]`。
+
+单元格：
+
+- `cells` 以字段键索引；每格含 `fieldId`、`value`、`isNull`、`evidence`，TABLEDATA 另含 `raw` 原文本，BINARY2 另含 `byteRange`。
+- BINARY2 的 `byteRange` 是解码后 STREAM 内的 `[start,end)` 字节区间；`evidence.stream` 给出该 STREAM 在 XML 中的定位。空值单元格照样按声明消耗完整物理表示，因此后续字段与目标编号不串位。
+- `long` 一律输出十进制字符串；浮点零、`-0`、`Infinity`/`NaN`（以字符串表示）、空数组、空文本、`null` 互相区分。
+- 变长列的边界只由本表 FIELD 的 `arraysize` 与长度前缀决定，不从样本值推断。长度前缀为负、超出声明维度或元素/字节预算时整表进 `pending`，不做截短、补零或丢列。
+- TABLEDATA 标量空 TD 为缺测（`isNull: true`）；变长 char 空 TD 为空文本；变长数值空 TD 记为空数组，`raw` 仍保留为空串。
+
 来源生成器binaryRow和votableDocument只用于交接源，不能作为采集器读取来源参数或按场景名返回固定结果的捷径。
 
 参考规范：https://ivoa.net/documents/VOTable/20250116/REC-VOTable-1.5.html ，本接入仅使用其中兼容1.4的范围。
